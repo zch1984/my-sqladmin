@@ -21,7 +21,7 @@ import logging
 from config import settings, get_admin_config
 from base import DATABASE_URL, postgres_engine_2
 from models.auth_model import User, AuthCredentials
-from admin.auth_admin_final import (
+from admin.auth_admin import (
     UserPermissionAdmin,
     CredentialsPermissionAdmin,
     PermissionError,

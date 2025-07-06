@@ -1,166 +1,65 @@
 """
-SQLAdmin 管理界面配置
-兼容SQLAdmin 0.21.0版本
+SQLAdmin 权限管理完整实现
+基于用户角色的细粒度权限控制
+参考 SQLAdmin 官方文档的最佳实践
 """
 
-from typing import Any, Dict, List, Optional
-from datetime import datetime
+from typing import Any, Dict, Optional
 from sqladmin import ModelView
 from sqlalchemy import func, and_, or_
-from sqlalchemy.orm import Session
+from starlette.requests import Request
+from starlette.responses import Response
 from wtforms import (
-    SelectField,
     TextAreaField,
     DateTimeField,
-    PasswordField,
-    StringField,
-    ValidationError,
 )
 from wtforms.validators import DataRequired, Email, Length, Optional as WTFOptional
-from wtforms.widgets import PasswordInput, TextArea
-import json
+import logging
 
 from models.auth_model import User, AuthCredentials, InfoStatusTypeEnum
-
-
-"""
-SQLAdmin 管理界面配置
-参考官方文档：https://aminalaee.github.io/sqladmin/model_convertors/
-"""
-
-from typing import Any, Dict, List, Optional
-from datetime import datetime
-from sqladmin import ModelView
-from sqlalchemy import func, and_, or_
-from sqlalchemy.orm import Session
-from wtforms import (
-    SelectField,
-    TextAreaField,
-    DateTimeField,
-    PasswordField,
-    StringField,
-    ValidationError,
+from forms.auth_forms import (
+    CustomJSONField,
+    CustomPasswordField,
+    InfoStatusSelectField,
+    format_json_column,
 )
-from wtforms.validators import DataRequired, Email, Length, Optional as WTFOptional
-from wtforms.widgets import PasswordInput, TextArea
-import json
 
-from models.auth_model import User, AuthCredentials, InfoStatusTypeEnum
+logger = logging.getLogger(__name__)
 
 
-# JSON字段格式化函数
-def format_json_column(data: Any, max_length: int = 100) -> str:
-    """格式化JSON数据用于列表显示"""
-    if data is None:
-        return "无"
+class PermissionError(Exception):
+    """权限错误异常"""
 
-    try:
-        if isinstance(data, dict):
-            # 如果是字典，显示键的数量
-            keys = list(data.keys())
-            if len(keys) <= 3:
-                key_str = ", ".join(f'"{k}"' for k in keys)
-                return f"{{{key_str}}}"
-            else:
-                key_str = ", ".join(f'"{k}"' for k in keys[:2])
-                return f"{{{key_str}, ...}} ({len(keys)}个字段)"
-        elif isinstance(data, list):
-            return f"[数组] ({len(data)}个元素)"
-        else:
-            # 转换为JSON字符串并截断
-            json_str = json.dumps(data, ensure_ascii=False)
-            if len(json_str) > max_length:
-                return json_str[:max_length] + "..."
-            return json_str
-    except Exception:
-        return (
-            str(data)[:max_length] + "..." if len(str(data)) > max_length else str(data)
-        )
+    def __init__(self, message: str = "权限不足"):
+        self.message = message
+        super().__init__(self.message)
 
 
-def format_json_detail(data: Any) -> str:
-    """格式化JSON数据用于详情显示"""
-    if data is None:
-        return "无"
+class BasePermissionAdmin(ModelView):
+    """基础权限管理类"""
 
-    try:
-        return json.dumps(data, ensure_ascii=False, indent=2)
-    except Exception:
-        return str(data)
+    def _get_session(self):
+        """获取数据库会话 - SQLAdmin的标准方式"""
+        from base import SessionLocal
 
+        return SessionLocal()
 
-# 自定义JSON字段（参考官方Model Convertors文档）
-class CustomJSONField(TextAreaField):
-    """自定义JSON字段，支持友好显示和验证"""
+    def get_current_user(self, request: Request) -> Optional[User]:
+        """获取当前登录用户"""
+        return getattr(request.state, "user", None)
 
-    def process_formdata(self, valuelist):
-        if valuelist and valuelist[0]:
-            try:
-                # 尝试解析JSON
-                if valuelist[0].strip():
-                    parsed_data = json.loads(valuelist[0])
-                    self.data = parsed_data
-                else:
-                    self.data = None
-            except (json.JSONDecodeError, ValueError) as e:
-                # 如果不是有效的JSON，保存原始数据并添加验证错误
-                self.data = valuelist[0]
-                raise ValidationError(f"无效的JSON格式: {str(e)}")
-        else:
-            self.data = None
+    def is_superuser(self, request: Request) -> bool:
+        """检查是否为超级用户"""
+        user = self.get_current_user(request)
+        return user and user.is_superuser
 
-    def _value(self):
-        if self.data is not None:
-            if isinstance(self.data, str):
-                # 如果是字符串，直接返回（可能是验证失败的情况）
-                return self.data
-            return json.dumps(self.data, ensure_ascii=False, indent=2)
-        return ""
-
-    def __call__(self, **kwargs):
-        kwargs.setdefault("rows", 8)
-        kwargs.setdefault("class_", "form-control json-field")
-        kwargs.setdefault(
-            "placeholder",
-            '请输入有效的JSON格式数据，例如：\n{\n  "key": "value",\n  "number": 123\n}',
-        )
-        return super().__call__(**kwargs)
+    async def check_permissions(self, request: Request, action: str = "view") -> bool:
+        """检查权限 - 子类需要重写"""
+        return True
 
 
-# 自定义密码字段
-class CustomPasswordField(StringField):
-    """自定义密码字段，支持空值不修改现有密码"""
-
-    widget = PasswordInput(hide_value=True)
-
-    def process_formdata(self, valuelist):
-        if valuelist and valuelist[0]:
-            self.data = valuelist[0]
-        else:
-            self.data = None
-
-    def __call__(self, **kwargs):
-        kwargs.setdefault("class_", "form-control")
-        kwargs.setdefault("placeholder", "输入新密码（留空保持现有密码不变）")
-        return super().__call__(**kwargs)
-
-
-# 信息状态选择字段
-class InfoStatusSelectField(SelectField):
-    """信息状态选择字段"""
-
-    def __init__(self, *args, **kwargs):
-        choices = [
-            (InfoStatusTypeEnum.PUBLIC.value, "公开"),
-            (InfoStatusTypeEnum.PRIVATE.value, "私有"),
-        ]
-        kwargs["choices"] = choices
-        kwargs["coerce"] = int
-        super().__init__(*args, **kwargs)
-
-
-class UserAdmin(ModelView, model=User):
-    """用户管理界面配置"""
+class UserPermissionAdmin(BasePermissionAdmin, model=User):
+    """用户权限管理界面"""
 
     # 基本配置
     name = "用户"
@@ -196,7 +95,7 @@ class UserAdmin(ModelView, model=User):
     }
 
     # 可搜索字段
-    column_searchable_list = ["username", "email", "pp_token"]
+    column_searchable_list = ["username", "email"]
 
     # 可排序字段
     column_sortable_list = ["id", "username", "email", "created_at", "updated_at"]
@@ -205,7 +104,7 @@ class UserAdmin(ModelView, model=User):
     page_size = 20
     page_size_options = [10, 20, 50, 100]
 
-    # 表单配置 - 不包含虚拟字段
+    # 表单配置 - 静态设置（动态控制在运行时处理）
     form_columns = [
         "username",
         "email",
@@ -234,7 +133,7 @@ class UserAdmin(ModelView, model=User):
 
     # 表单重写字段类型
     form_overrides = {
-        "description": CustomJSONField,  # 使用自定义JSON字段
+        "description": CustomJSONField,
         "remark": TextAreaField,
     }
 
@@ -252,7 +151,7 @@ class UserAdmin(ModelView, model=User):
         "updated_at",
     ]
 
-    # 列格式化 - 改进JSON字段显示
+    # 列格式化
     column_formatters = {
         "description": lambda m, a: format_json_column(m.description, max_length=80),
         "pp_token": lambda m, a: (
@@ -268,55 +167,150 @@ class UserAdmin(ModelView, model=User):
         ),
     }
 
-    # 列详情格式化 - 在详情页面中更好地显示JSON
-    column_formatters_detail = {
-        "description": lambda m, a: format_json_detail(m.description),
-        "pp_token": lambda m, a: m.pp_token,
-        "created_at": lambda m, a: (
-            m.created_at.strftime("%Y-%m-%d %H:%M:%S") if m.created_at else "无"
-        ),
-        "updated_at": lambda m, a: (
-            m.updated_at.strftime("%Y-%m-%d %H:%M:%S") if m.updated_at else "无"
-        ),
-    }
+    # 权限控制属性 - 动态设置
+    @property
+    def can_create(self) -> bool:
+        """只有超级用户可以创建用户"""
+        return True  # 在具体操作中检查
 
-    # 自定义操作
-    can_create = True
-    can_edit = True
-    can_delete = True
-    can_view_details = True
-    can_export = True
+    @property
+    def can_edit(self) -> bool:
+        """根据权限决定是否可以编辑"""
+        return True  # 在具体操作中检查
 
-    async def on_model_change(
-        self, data: Dict[str, Any], model: User, is_created: bool, request
-    ) -> None:
-        """模型变更时的回调"""
-        if is_created:
-            # 创建时自动生成pp_token
-            if not model.pp_token:
-                model.pp_token = User.generate_pp_token()
+    @property
+    def can_delete(self) -> bool:
+        """只有超级用户可以删除用户"""
+        return True  # 在具体操作中检查
 
-        # 处理密码字段
-        if "password" in data and data["password"]:
-            # 如果提供了新密码，则加密并保存
-            model.hashed_password = User.hash_password(data["password"])
+    @property
+    def can_view_details(self) -> bool:
+        """可以查看详情"""
+        return True
 
-        # 处理JSON字段 - description
-        if "description" in data:
-            if data["description"]:
-                # 数据已经在CustomJSONField中处理过了，直接赋值
-                model.description = data["description"]
+    # 重写查询方法 - 核心权限过滤（使用SQLAdmin的正确方法名）
+    def list_query(self, request: Request):
+        """根据用户权限过滤用户列表"""
+        current_user = self.get_current_user(request)
+        logger.info(
+            f"UserAdmin list_query 被调用 - 当前用户: {current_user.username if current_user else 'None'}"
+        )
+
+        # 使用 SQLAdmin 的标准会话获取方式
+        session = self._get_session()
+        query = session.query(self.model)
+
+        if not current_user:
+            # 未登录用户返回空查询
+            logger.warning("用户未登录，返回空查询")
+            return query.filter(False)
+
+        if current_user.is_superuser:
+            # 超级用户可以看到所有用户
+            logger.info(f"超级用户 {current_user.username} 查看所有用户")
+            return query
+        else:
+            # 普通用户只能看到自己
+            logger.info(f"普通用户 {current_user.username} 只能查看自己的信息")
+            return query.filter(User.id == current_user.id)
+
+    async def list(self, request: Request) -> Response:
+        """重写列表方法，确保权限过滤"""
+        current_user = self.get_current_user(request)
+        logger.info(
+            f"UserAdmin list 方法被调用 - 当前用户: {current_user.username if current_user else 'None'}"
+        )
+
+        if not current_user:
+            raise PermissionError("用户未登录")
+
+        return await super().list(request)
+
+    def count_query(self, request: Request):
+        """计数查询，也需要应用权限过滤"""
+        current_user = self.get_current_user(request)
+        logger.info(
+            f"UserAdmin count_query - 当前用户: {current_user.username if current_user else 'None'}"
+        )
+
+        session = self._get_session()
+        query = session.query(func.count(self.model.id))
+
+        if not current_user:
+            logger.warning("用户未登录，返回 0")
+            return query.filter(False)
+
+        if current_user.is_superuser:
+            logger.info("超级用户 - 返回所有用户的计数查询")
+            return query
+        else:
+            # 普通用户只能看到自己
+            logger.info(f"普通用户 - 返回自己的计数查询，用户ID: {current_user.id}")
+            return query.filter(User.id == current_user.id)
+
+    def details_query(self, request: Request):
+        """详情查询，应用权限过滤"""
+        return self.list_query(request)
+
+    def get_one(self, id: Any, request: Request):
+        """获取单个用户 - 权限检查"""
+        current_user = self.get_current_user(request)
+
+        if not current_user:
+            return None
+
+        session = self._get_session()
+        query = session.query(self.model)
+
+        if current_user.is_superuser:
+            # 超级用户可以查看任何用户
+            return query.filter(self.model.id == id).first()
+        else:
+            # 普通用户只能查看自己
+            if int(id) == current_user.id:
+                return query.filter(self.model.id == id).first()
             else:
-                model.description = None
+                return None
 
+    # 重写操作方法
+    async def create(self, request: Request) -> Response:
+        """创建用户 - 权限检查"""
+        current_user = self.get_current_user(request)
+
+        if not current_user or not current_user.is_superuser:
+            raise PermissionError("只有超级管理员可以创建用户")
+
+        return await super().create(request)
+
+    async def edit(self, request: Request) -> Response:
+        """编辑用户 - 权限检查"""
+        current_user = self.get_current_user(request)
+        user_id = request.path_params.get("pk")
+
+        if not current_user:
+            raise PermissionError("用户未登录")
+
+        if not current_user.is_superuser:
+            # 普通用户只能编辑自己
+            if not (user_id and int(user_id) == current_user.id):
+                raise PermissionError("只能编辑自己的信息")
+
+        return await super().edit(request)
+
+    async def delete(self, request: Request) -> Response:
+        """删除用户 - 权限检查"""
+        current_user = self.get_current_user(request)
+
+        if not current_user or not current_user.is_superuser:
+            raise PermissionError("只有超级管理员可以删除用户")
+
+        return await super().delete(request)
+
+    # 动态表单字段控制 - 通过scaffold_form实现
     async def scaffold_form(self, form_class=None):
-        """自定义表单构建，添加密码字段"""
-        from wtforms import BooleanField
-
-        # 获取基本表单
+        """构建表单，根据权限动态调整字段和添加密码字段"""
         FormClass = await super().scaffold_form(form_class)
 
-        # 动态添加密码字段
         class UserForm(FormClass):
             password = CustomPasswordField(
                 "密码",
@@ -326,9 +320,46 @@ class UserAdmin(ModelView, model=User):
 
         return UserForm
 
+    async def on_model_change(
+        self, data: Dict[str, Any], model: User, is_created: bool, request: Request
+    ) -> None:
+        """模型变更时的回调 - 权限和字段检查"""
+        current_user = self.get_current_user(request)
 
-class AuthCredentialsAdmin(ModelView, model=AuthCredentials):
-    """认证凭据管理界面配置"""
+        if not current_user:
+            raise PermissionError("用户未登录")
+
+        # 权限检查
+        if is_created and not current_user.is_superuser:
+            raise PermissionError("只有超级管理员可以创建用户")
+
+        if not is_created:
+            # 编辑时权限检查
+            if not current_user.is_superuser and current_user.id != model.id:
+                raise PermissionError("只能修改自己的信息")
+
+            # 普通用户字段限制检查
+            if not current_user.is_superuser:
+                forbidden_fields = ["pp_token", "is_superuser", "is_active"]
+                for field in forbidden_fields:
+                    if field in data:
+                        raise PermissionError(f"无权修改字段: {field}")
+
+        # 处理密码
+        if "password" in data and data["password"]:
+            model.hashed_password = User.hash_password(data["password"])
+
+        # 处理JSON字段
+        if "description" in data:
+            model.description = data["description"] if data["description"] else None
+
+        # 创建时生成pp_token
+        if is_created and not model.pp_token:
+            model.pp_token = User.generate_pp_token()
+
+
+class CredentialsPermissionAdmin(BasePermissionAdmin, model=AuthCredentials):
+    """认证凭据权限管理界面"""
 
     # 基本配置
     name = "认证凭据"
@@ -378,7 +409,7 @@ class AuthCredentialsAdmin(ModelView, model=AuthCredentials):
     page_size = 20
     page_size_options = [10, 20, 50, 100]
 
-    # 表单配置
+    # 表单配置 - 静态设置（动态控制在运行时处理）
     form_columns = [
         "info",
         "info_status",
@@ -412,9 +443,9 @@ class AuthCredentialsAdmin(ModelView, model=AuthCredentials):
 
     # 表单重写字段类型
     form_overrides = {
-        "info_status": InfoStatusSelectField,  # 使用自定义选择字段
-        "config_info": CustomJSONField,  # 使用自定义JSON字段
-        "description": CustomJSONField,  # 使用自定义JSON字段
+        "info_status": InfoStatusSelectField,
+        "config_info": CustomJSONField,
+        "description": CustomJSONField,
         "expires_at": DateTimeField,
     }
 
@@ -450,36 +481,242 @@ class AuthCredentialsAdmin(ModelView, model=AuthCredentials):
         ),
     }
 
-    # 详情页面格式化
-    column_formatters_detail = {
-        "info_status": lambda m, a: (
-            "公开" if m.info_status == InfoStatusTypeEnum.PUBLIC.value else "私有"
-        ),
-        "user": lambda m, a: m.user.username if m.user else "无关联用户",
-        "expires_at": lambda m, a: (
-            m.expires_at.strftime("%Y-%m-%d %H:%M:%S") if m.expires_at else "永不过期"
-        ),
-        "config_info": lambda m, a: format_json_detail(m.config_info),
-        "description": lambda m, a: format_json_detail(m.description),
-        "created_at": lambda m, a: (
-            m.created_at.strftime("%Y-%m-%d %H:%M:%S") if m.created_at else "无"
-        ),
-        "updated_at": lambda m, a: (
-            m.updated_at.strftime("%Y-%m-%d %H:%M:%S") if m.updated_at else "无"
-        ),
-    }
+    # 权限控制属性 - 动态设置
+    @property
+    def can_create(self) -> bool:
+        """根据权限决定是否可以创建"""
+        return True  # 在具体操作中检查
 
-    # 自定义操作
-    can_create = True
-    can_edit = True
-    can_delete = True
-    can_view_details = True
-    can_export = True
+    @property
+    def can_edit(self) -> bool:
+        """根据权限决定是否可以编辑"""
+        return True  # 在具体操作中检查
+
+    @property
+    def can_delete(self) -> bool:
+        """根据权限决定是否可以删除"""
+        return True  # 在具体操作中检查
+
+    @property
+    def can_view_details(self) -> bool:
+        """可以查看详情"""
+        return True
+
+    # 重写查询方法 - 核心权限过滤（使用SQLAdmin的正确方法名）
+    def list_query(self, request: Request):
+        """根据用户权限过滤认证凭据列表"""
+        current_user = self.get_current_user(request)
+
+        logger.info(
+            f"CredentialsAdmin list_query 被调用 - 当前用户: {current_user.username if current_user else 'None'}"
+        )
+
+        session = self._get_session()
+        query = session.query(self.model)
+
+        if not current_user:
+            # 未登录用户返回空查询
+            logger.warning("用户未登录，返回空查询")
+            return query.filter(False)
+
+        if current_user.is_superuser:
+            # 超级用户可以看到所有凭据
+            logger.info(f"超级用户 {current_user.username} 查看所有认证凭据")
+            return query
+        else:
+            # 普通用户只能看到：
+            # 1. 公开的凭据（info_status=0）
+            # 2. 自己关联的私有凭据（info_status=1 且 user_id=当前用户）
+            logger.info(f"普通用户 {current_user.username} 查看受限的认证凭据")
+            return query.filter(
+                or_(
+                    # 公开凭据 - 可查看但不能编辑
+                    AuthCredentials.info_status == InfoStatusTypeEnum.PUBLIC.value,
+                    # 自己的私有凭据 - 可查看和编辑
+                    and_(
+                        AuthCredentials.info_status == InfoStatusTypeEnum.PRIVATE.value,
+                        AuthCredentials.user_id == current_user.id,
+                    ),
+                )
+            )
+
+    async def list(self, request: Request) -> Response:
+        """重写列表方法，确保权限过滤"""
+        current_user = self.get_current_user(request)
+        logger.info(
+            f"CredentialsAdmin list 方法被调用 - 当前用户: {current_user.username if current_user else 'None'}"
+        )
+
+        if not current_user:
+            raise PermissionError("用户未登录")
+
+        return await super().list(request)
+
+    def count_query(self, request: Request):
+        """计数查询，也需要应用权限过滤"""
+        current_user = self.get_current_user(request)
+        logger.info(
+            f"CredentialsAdmin count_query - 当前用户: {current_user.username if current_user else 'None'}"
+        )
+
+        session = self._get_session()
+        query = session.query(func.count(self.model.id))
+
+        if not current_user:
+            logger.warning("用户未登录，返回 0")
+            return query.filter(False)
+
+        if current_user.is_superuser:
+            # 超级用户可以看到所有凭据
+            logger.info("超级用户 - 返回所有凭据的计数查询")
+            return query
+        else:
+            # 普通用户只能看到自己的私有凭据和所有公开凭据
+            return query.filter(
+                or_(
+                    # 公开凭据
+                    AuthCredentials.info_status == InfoStatusTypeEnum.PUBLIC.value,
+                    # 自己的私有凭据
+                    and_(
+                        AuthCredentials.info_status == InfoStatusTypeEnum.PRIVATE.value,
+                        AuthCredentials.user_id == current_user.id,
+                    ),
+                )
+            )
+
+    def details_query(self, request: Request):
+        """详情查询，应用权限过滤"""
+        return self.list_query(request)
+
+    def get_one(self, id: Any, request: Request):
+        """获取单个认证凭据 - 权限检查"""
+        current_user = self.get_current_user(request)
+
+        if not current_user:
+            return None
+
+        session = self._get_session()
+        query = session.query(self.model)
+        credential = query.filter(self.model.id == id).first()
+
+        if not credential:
+            return None
+
+        if current_user.is_superuser:
+            # 超级用户可以查看任何凭据
+            return credential
+        else:
+            # 普通用户只能查看公开凭据或自己的私有凭据
+            if credential.info_status == InfoStatusTypeEnum.PUBLIC.value or (
+                credential.info_status == InfoStatusTypeEnum.PRIVATE.value
+                and credential.user_id == current_user.id
+            ):
+                return credential
+            else:
+                return None
+
+    # 重写操作方法
+    async def create(self, request: Request) -> Response:
+        """创建认证凭据 - 权限检查"""
+        current_user = self.get_current_user(request)
+
+        if not current_user:
+            raise PermissionError("用户未登录")
+
+        # 所有用户都可以创建凭据，但普通用户只能创建私有凭据
+        return await super().create(request)
+
+    async def edit(self, request: Request) -> Response:
+        """编辑认证凭据 - 权限检查"""
+        current_user = self.get_current_user(request)
+        credential_id = request.path_params.get("pk")
+
+        if not current_user:
+            raise PermissionError("用户未登录")
+
+        session = self._get_session()
+
+        if current_user.is_superuser:
+            # 超级用户可以编辑任何凭据
+            return await super().edit(request)
+        else:
+            # 普通用户只能编辑自己的私有凭据
+            if credential_id:
+                # 这里需要用 session 查询，而不是 get_one，避免循环调用
+                credential = (
+                    session.query(self.model)
+                    .filter(self.model.id == credential_id)
+                    .first()
+                )
+                if (
+                    credential
+                    and credential.info_status == InfoStatusTypeEnum.PRIVATE.value
+                    and credential.user_id == current_user.id
+                ):
+                    return await super().edit(request)
+                else:
+                    raise PermissionError("只能编辑自己的私有认证凭据")
+            else:
+                raise PermissionError("凭据不存在")
+
+    async def delete(self, request: Request) -> Response:
+        """删除认证凭据 - 权限检查"""
+        current_user = self.get_current_user(request)
+        credential_id = request.path_params.get("pk")
+
+        if not current_user:
+            raise PermissionError("用户未登录")
+
+        session = self._get_session()
+
+        if current_user.is_superuser:
+            # 超级用户可以删除任何凭据
+            return await super().delete(request)
+        else:
+            # 普通用户只能删除自己的私有凭据
+            if credential_id:
+                # 这里需要用 session 查询，而不是 get_one，避免循环调用
+                credential = (
+                    session.query(self.model)
+                    .filter(self.model.id == credential_id)
+                    .first()
+                )
+                if (
+                    credential
+                    and credential.info_status == InfoStatusTypeEnum.PRIVATE.value
+                    and credential.user_id == current_user.id
+                ):
+                    return await super().delete(request)
+                else:
+                    raise PermissionError("只能删除自己的私有认证凭据")
+            else:
+                raise PermissionError("凭据不存在")
+
+    # 在权限检查和数据处理中实现字段控制
 
     async def on_model_change(
-        self, data: Dict[str, Any], model: AuthCredentials, is_created: bool, request
+        self,
+        data: Dict[str, Any],
+        model: AuthCredentials,
+        is_created: bool,
+        request: Request,
     ) -> None:
-        """模型变更时的回调"""
+        """模型变更时的回调 - 权限和字段检查"""
+        current_user = self.get_current_user(request)
+
+        if not current_user:
+            raise PermissionError("用户未登录")
+
+        # 权限检查
+        if not is_created:
+            # 编辑时权限检查
+            if not current_user.is_superuser:
+                # 普通用户只能修改自己的私有凭据
+                if not (
+                    model.info_status == InfoStatusTypeEnum.PRIVATE.value
+                    and model.user_id == current_user.id
+                ):
+                    raise PermissionError("只能修改自己的私有认证凭据")
 
         # 处理info_status字段
         if "info_status" in data:
@@ -490,76 +727,29 @@ class AuthCredentialsAdmin(ModelView, model=AuthCredentials):
                 except ValueError:
                     model.info_status = InfoStatusTypeEnum.PRIVATE.value
 
-        # 处理JSON字段 - 数据已经在CustomJSONField中处理过了
+        # 处理JSON字段
         for field in ["config_info", "description"]:
             if field in data:
-                if data[field]:
-                    setattr(model, field, data[field])
-                else:
-                    setattr(model, field, None)
+                setattr(model, field, data[field] if data[field] else None)
 
-        # 根据info_status自动设置用户关联
-        if hasattr(model, "info_status"):
-            if model.info_status == InfoStatusTypeEnum.PUBLIC.value:
-                model.user_id = None
-            # 私有状态下保持现有的user_id设置
+        # 创建时的特殊处理
+        if is_created:
+            if not current_user.is_superuser:
+                # 普通用户创建的凭据自动设为私有并关联到自己
+                model.info_status = InfoStatusTypeEnum.PRIVATE.value
+                model.user_id = current_user.id
+            else:
+                # 超级用户创建时，根据info_status设置用户关联
+                if model.info_status == InfoStatusTypeEnum.PUBLIC.value:
+                    model.user_id = None
+                elif "user_id" not in data or not data["user_id"]:
+                    # 如果是私有状态但没有指定用户，关联到当前用户
+                    model.user_id = current_user.id
 
 
-# 自定义仪表板统计
-class DashboardStats:
-    """仪表板统计数据"""
-
-    @staticmethod
-    def get_user_stats(session: Session) -> Dict[str, Any]:
-        """获取用户统计"""
-        total_users = session.query(func.count(User.id)).scalar()
-        active_users = (
-            session.query(func.count(User.id)).filter(User.is_active == True).scalar()
-        )
-        super_users = (
-            session.query(func.count(User.id))
-            .filter(User.is_superuser == True)
-            .scalar()
-        )
-
-        return {
-            "total_users": total_users,
-            "active_users": active_users,
-            "super_users": super_users,
-            "inactive_users": total_users - active_users,
-        }
-
-    @staticmethod
-    def get_credentials_stats(session: Session) -> Dict[str, Any]:
-        """获取认证凭据统计"""
-        total_credentials = session.query(func.count(AuthCredentials.id)).scalar()
-        public_credentials = (
-            session.query(func.count(AuthCredentials.id))
-            .filter(AuthCredentials.info_status == InfoStatusTypeEnum.PUBLIC.value)
-            .scalar()
-        )
-        private_credentials = (
-            session.query(func.count(AuthCredentials.id))
-            .filter(AuthCredentials.info_status == InfoStatusTypeEnum.PRIVATE.value)
-            .scalar()
-        )
-
-        # 过期凭据统计
-        now = datetime.now()
-        expired_credentials = (
-            session.query(func.count(AuthCredentials.id))
-            .filter(
-                and_(
-                    AuthCredentials.expires_at.isnot(None),
-                    AuthCredentials.expires_at < now,
-                )
-            )
-            .scalar()
-        )
-
-        return {
-            "total_credentials": total_credentials,
-            "public_credentials": public_credentials,
-            "private_credentials": private_credentials,
-            "expired_credentials": expired_credentials,
-        }
+# 导出类
+__all__ = [
+    "UserPermissionAdmin",
+    "CredentialsPermissionAdmin",
+    "PermissionError",
+]
