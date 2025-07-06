@@ -21,11 +21,13 @@ DATABASE_URL = os.getenv(
 )
 ASYNC_DATABASE_URL = DATABASE_URL.replace("postgresql://", "postgresql+asyncpg://")
 
-# 同步数据库引擎和会话（用于 FastAdmin）
-postgres_engine_2 = create_engine(DATABASE_URL, echo=True)
-PostgresSessionLocal2 = sessionmaker(
-    autocommit=False, autoflush=False, bind=postgres_engine_2
-)
+# 同步数据库引擎和会话（用于 SQLAdmin）
+engine = create_engine(DATABASE_URL, echo=True)
+SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
+
+# 向后兼容的别名
+postgres_engine_2 = engine
+PostgresSessionLocal2 = SessionLocal
 
 # 异步数据库引擎和会话（用于 FastAPI 路由）
 async_engine = create_async_engine(ASYNC_DATABASE_URL, echo=True)
@@ -37,7 +39,7 @@ AsyncSessionLocal = async_sessionmaker(
 # 依赖项：获取数据库会话
 def get_db():
     """获取同步数据库会话"""
-    db = PostgresSessionLocal2()
+    db = SessionLocal()
     try:
         yield db
     finally:

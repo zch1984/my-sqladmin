@@ -91,10 +91,22 @@ class AdminAuthenticationBackend(DatabaseAuthenticationBackend):
         return False
 
 
+class FlexibleAuthenticationBackend(DatabaseAuthenticationBackend):
+    """灵活认证后端（允许所有有效用户登录，但根据权限控制访问）"""
+
+    async def authenticate(self, request: Request) -> bool:
+        """验证用户是否已登录"""
+        # 使用基础认证，允许所有有效用户登录
+        return await super().authenticate(request)
+
+
 # 创建认证实例
 auth_backend = DatabaseAuthenticationBackend(
     secret_key="your-secret-key-change-in-production"
 )
 admin_auth_backend = AdminAuthenticationBackend(
+    secret_key="your-secret-key-change-in-production"
+)
+flexible_auth_backend = FlexibleAuthenticationBackend(
     secret_key="your-secret-key-change-in-production"
 )
